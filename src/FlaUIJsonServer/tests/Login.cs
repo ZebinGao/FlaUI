@@ -9,7 +9,7 @@ namespace FlaUIJsonServer.tests
 	{
 		// 🔥 极其重要：UI自动化必须在这个单线程单元里跑
 		[STAThread]
-		static void Main(string[] args)
+		static void Test_login()
 		{
 			Console.WriteLine("======================================================");
 			Console.WriteLine("开始执行本地直连测试: 验证登录成功 (脱离 WinAppDriver)");
