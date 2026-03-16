@@ -11,7 +11,7 @@ using OperatingSystem = FlaUI.Core.Tools.OperatingSystem;
 namespace FlaUI.Core.UITests
 {
     [TestFixture]
-    [Ignore("Fails on appveyor due to docker popup.")]
+    //[Ignore("Fails on appveyor due to docker popup.")]
     public class CalculatorTests : FlaUITestBase
     {
         protected override AutomationBase GetAutomation()
