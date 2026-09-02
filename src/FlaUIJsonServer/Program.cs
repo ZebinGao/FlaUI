@@ -1,28 +1,51 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace FlaUIJsonServer
 {
     /// <summary>
     /// 任务请求模型
+    /// 使用 JsonPropertyName 特性将 snake_case 的 JSON 字段映射到 PascalCase 的 C# 属性
     /// </summary>
     public class TaskRequest
     {
         /// <summary>
         /// 任务唯一标识
         /// </summary>
+        [JsonPropertyName("task_id")]
         public string TaskId { get; set; } = string.Empty;
 
         /// <summary>
-        /// 测试用例名称（对应 tests 文件夹下的类名）
+        /// 测试用例 ID
         /// </summary>
-        public string TestCase { get; set; } = string.Empty;
+        [JsonPropertyName("test_case_id")]
+        public string TestCaseId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 测试用例名称
+        /// </summary>
+        [JsonPropertyName("test_case_name")]
+        public string TestCaseName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 程序路径配置（包含 simulator, rt, testConfig, dataCollection, ui 等路径）
+        /// </summary>
+        [JsonPropertyName("paths")]
+        public Dictionary<string, string> Paths { get; set; } = new();
 
         /// <summary>
         /// 结果回调 URL
         /// </summary>
+        [JsonPropertyName("callback_url")]
         public string CallbackUrl { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 时间戳
+        /// </summary>
+        [JsonPropertyName("timestamp")]
+        public string Timestamp { get; set; } = string.Empty;
     }
 
     /// <summary>
@@ -74,8 +97,9 @@ namespace FlaUIJsonServer
             {
                 try
                 {
-                    // 记录接收到的任务
-                    app.Logger.LogInformation($"[收到任务] TaskId: {request.TaskId}, TestCase: {request.TestCase}, Callback: {request.CallbackUrl}");
+                    // 记录接收到的任务（包含所有关键字段）
+                    app.Logger.LogInformation($"[收到任务] TaskId: {request.TaskId}, TestCaseId: {request.TestCaseId}, TestCaseName: {request.TestCaseName}, Callback: {request.CallbackUrl}");
+                    app.Logger.LogInformation($"[路径配置] Simulator: {request.Paths.GetValueOrDefault("simulator", "未配置")}, UI: {request.Paths.GetValueOrDefault("ui", "未配置")}");
 
                     // 参数验证
                     if (string.IsNullOrWhiteSpace(request.TaskId))
@@ -84,16 +108,29 @@ namespace FlaUIJsonServer
                         return Results.BadRequest(new { status = "error", message = "TaskId 不能为空" });
                     }
 
-                    if (string.IsNullOrWhiteSpace(request.TestCase))
+                    if (string.IsNullOrWhiteSpace(request.TestCaseId))
                     {
-                        app.Logger.LogWarning("[参数错误] TestCase 为空");
-                        return Results.BadRequest(new { status = "error", message = "TestCase 不能为空" });
+                        app.Logger.LogWarning("[参数错误] TestCaseId 为空");
+                        return Results.BadRequest(new { status = "error", message = "TestCaseId 不能为空" });
                     }
 
                     if (string.IsNullOrWhiteSpace(request.CallbackUrl))
                     {
                         app.Logger.LogWarning("[参数错误] CallbackUrl 为空");
                         return Results.BadRequest(new { status = "error", message = "CallbackUrl 不能为空" });
+                    }
+
+                    // 验证关键路径配置
+                    if (!request.Paths.ContainsKey("simulator") || string.IsNullOrWhiteSpace(request.Paths["simulator"]))
+                    {
+                        app.Logger.LogWarning("[参数错误] Simulator 路径未配置");
+                        return Results.BadRequest(new { status = "error", message = "Simulator 路径不能为空" });
+                    }
+
+                    if (!request.Paths.ContainsKey("ui") || string.IsNullOrWhiteSpace(request.Paths["ui"]))
+                    {
+                        app.Logger.LogWarning("[参数错误] UI 路径未配置");
+                        return Results.BadRequest(new { status = "error", message = "UI 路径不能为空" });
                     }
 
                     // ============================================================
@@ -110,12 +147,19 @@ namespace FlaUIJsonServer
                     // 🔥 核心：在后台 STA 线程中异步执行测试
                     // 注意：绝对不能使用 Task.Run，因为线程池默认是 MTA
                     // ============================================================
-                    Thread testThread = new Thread(() => RunTestWrapper(request.TaskId, request.TestCase, request.CallbackUrl, app.Logger));
+                    Thread testThread = new Thread(() => RunTestWrapper(
+                        request.TaskId,
+                        request.TestCaseId,
+                        request.TestCaseName,
+                        request.Paths,
+                        request.CallbackUrl,
+                        app.Logger
+                    ));
                     testThread.SetApartmentState(ApartmentState.STA); // 必须设置为 STA
                     testThread.IsBackground = true; // 设置为后台线程，避免阻塞应用退出
                     testThread.Start();
 
-                    app.Logger.LogInformation($"[任务已调度] TaskId: {request.TaskId}, 线程已启动");
+                    app.Logger.LogInformation($"[任务已调度] TaskId: {request.TaskId}, TestCaseId: {request.TestCaseId}, 线程已启动");
 
                     return Results.Ok(response);
                 }
@@ -134,35 +178,52 @@ namespace FlaUIJsonServer
         /// 在这个方法中执行所有的 FlaUI UI 自动化逻辑
         /// </summary>
         /// <param name="taskId">任务 ID</param>
-        /// <param name="testCase">测试用例名称</param>
+        /// <param name="testCaseId">测试用例 ID</param>
+        /// <param name="testCaseName">测试用例名称</param>
+        /// <param name="paths">程序路径配置字典</param>
         /// <param name="callbackUrl">回调 URL</param>
         /// <param name="logger">日志记录器</param>
-        static void RunTestWrapper(string taskId, string testCase, string callbackUrl, ILogger logger)
+        static void RunTestWrapper(string taskId, string testCaseId, string testCaseName, 
+            Dictionary<string, string> paths, string callbackUrl, ILogger logger)
         {
             StringBuilder logs = new StringBuilder();
             string status = "fail";
 
             try
             {
-                logs.AppendLine($"[开始执行] TaskId: {taskId}, TestCase: {testCase}");
+                logs.AppendLine($"[开始执行] TaskId: {taskId}, TestCaseId: {testCaseId}, TestCaseName: {testCaseName}");
                 logs.AppendLine($"[时间] {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                logger.LogInformation($"[测试开始] TaskId: {taskId}, TestCase: {testCase}");
+                logs.AppendLine($"[配置路径] Simulator: {paths.GetValueOrDefault("simulator", "未配置")}");
+                logs.AppendLine($"[配置路径] UI: {paths.GetValueOrDefault("ui", "未配置")}");
+                logs.AppendLine($"[配置路径] RT: {paths.GetValueOrDefault("rt", "未配置")}");
+                logger.LogInformation($"[测试开始] TaskId: {taskId}, TestCaseId: {testCaseId}, TestCaseName: {testCaseName}");
 
                 // ============================================================
-                // 根据测试用例名称执行对应的测试
+                // 根据测试用例 ID 或名称执行对应的测试
                 // 注意：这里需要根据实际的 tests 文件夹下的类进行反射调用
-                // 为了演示，这里模拟执行测试
+                // 为了演示，这里使用 paths 中的实际路径执行测试
                 // ============================================================
 
-                switch (testCase.ToLower())
+                // 获取关键路径
+                string simulatorPath = paths.GetValueOrDefault("simulator", "");
+                string rtPath = paths.GetValueOrDefault("rt", "");
+                string dataCollectionPath = paths.GetValueOrDefault("dataCollection", "");
+                string uiPath = paths.GetValueOrDefault("ui", "");
+
+                switch (testCaseId.ToLower())
                 {
+                    case "login":
                     case "login_test":
                         // 这里可以调用 tests.Login 类中的测试方法
                         // 实际项目中，你应该通过反射动态调用测试类的方法
+                        // 并传入 simulatorPath, uiPath 等实际路径
                         logs.AppendLine("[执行测试] 登录测试");
-                        logs.AppendLine("[步骤1] 启动模拟器生态");
-                        logs.AppendLine("[步骤2] 启动 UI 应用程序");
+                        logs.AppendLine($"[步骤1] 启动模拟器: {simulatorPath}");
+                        logs.AppendLine($"[步骤2] 启动 UI 应用: {uiPath}");
                         logs.AppendLine("[步骤3] 执行登录操作");
+                        
+                        // TODO: 实际项目中，在这里调用 FlaUI 测试逻辑
+                        // 例如：tests.Login.RunLoginTest(simulatorPath, uiPath, rtPath, dataCollectionPath);
                         
                         // 模拟测试执行
                         Thread.Sleep(2000); // 模拟测试耗时
@@ -171,15 +232,9 @@ namespace FlaUIJsonServer
                         status = "success";
                         break;
 
-                    case "other_test":
-                        logs.AppendLine("[执行测试] 其他测试用例");
-                        Thread.Sleep(1000);
-                        logs.AppendLine("[测试结果] 测试完成");
-                        status = "success";
-                        break;
-
                     default:
-                        logs.AppendLine($"[错误] 未知的测试用例: {testCase}");
+                        logs.AppendLine($"[错误] 未知的测试用例 ID: {testCaseId}, 名称: {testCaseName}");
+                        logs.AppendLine($"[提示] 请确保测试用例 ID 与 tests 文件夹下的类名匹配");
                         status = "fail";
                         break;
                 }

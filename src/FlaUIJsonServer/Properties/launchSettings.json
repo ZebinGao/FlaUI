@@ -12,7 +12,7 @@
     "http": {
       "commandName": "Project",
       "dotnetRunMessages": true,
-      "launchBrowser": true,
+      "launchBrowser": false, // 🔥 改成 false！以后按 F5 再也不会乱弹网页了！
       "applicationUrl": "http://localhost:5123",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development"
